@@ -6,62 +6,169 @@ if (!isset($_SESSION['user_id']) || ($_SESSION['role'] != 'admin' && $_SESSION['
     header("Location: index.php");
     exit;
 }
-
+const ROLE_ADMIN = 'admin';
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $action = $_POST['action'] ?? 'update_status';
-    $booking_id = $_POST['booking_id'];
+    try {
+        switch ($action) {
+            case 'validate_payment':
+                validatePayment($pdo, $_POST['booking_id']);
+                break;
 
-    if ($action == 'validate_payment' && $_SESSION['role'] == 'admin') {
-        $stmt = $pdo->prepare("UPDATE bookings SET payment_status = 'Paid' WHERE id = ?");
-        $stmt->execute([$booking_id]);
-        
-        $stmt = $pdo->prepare("INSERT INTO tracking_logs (booking_id, status, description) VALUES (?, 'Payment Validated', 'Pembayaran telah divalidasi oleh admin')");
-        $stmt->execute([$booking_id]);
-    }
-    elseif ($action == 'assign_kurir' && $_SESSION['role'] == 'admin') {
-        $kurir_id = $_POST['kurir_id'];
-        $stmt = $pdo->prepare("UPDATE bookings SET kurir_id = ? WHERE id = ?");
-        $stmt->execute([$kurir_id, $booking_id]);
-        
-        // Fetch kurir name for log
-        $stmt_k = $pdo->prepare("SELECT name FROM users WHERE id = ?");
-        $stmt_k->execute([$kurir_id]);
-        $kurir_name = $stmt_k->fetchColumn();
+            case 'assign_kurir':
+                assignKurir(
+                    $pdo,
+                    $_POST['booking_id'],
+                    $_POST['kurir_id']
+                );
+                break;
 
-        $desc = 'Order di-assign ke kurir: ' . $kurir_name;
-        $stmt = $pdo->prepare("INSERT INTO tracking_logs (booking_id, status, description) VALUES (?, 'Assigned to Kurir', ?)");
-        $stmt->execute([$booking_id, $desc]);
-    }
-    elseif ($action == 'update_status') {
-        $status = $_POST['status'];
-
-        $stmt = $pdo->prepare("UPDATE bookings SET status = ? WHERE id = ?");
-        $stmt->execute([$status, $booking_id]);
-
-        $desc = "Status diupdate menjadi " . $status;
-        $photo_proof = null;
-
-        // Handle Photo Upload
-        if (isset($_FILES['photo']) && $_FILES['photo']['error'] == 0) {
-            $allowed = ['jpg', 'jpeg', 'png', 'webp'];
-            $filename = $_FILES['photo']['name'];
-            $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-            
-            if (in_array($ext, $allowed)) {
-                $new_filename = uniqid('proof_') . '.' . $ext;
-                $destination = 'uploads/' . $new_filename;
-                
-                if (move_uploaded_file($_FILES['photo']['tmp_name'], $destination)) {
-                    $photo_proof = $destination;
-                }
-            }
+            case 'update_status':
+                updateBookingStatus(
+                    $pdo,
+                    $_POST['booking_id'],
+                    $_POST['status'],
+                    $_FILES['photo'] ?? null
+                );
+                break;
         }
-
-        $stmt = $pdo->prepare("INSERT INTO tracking_logs (booking_id, status, description, photo_proof) VALUES (?, ?, ?, ?)");
-        $stmt->execute([$booking_id, $status, $desc, $photo_proof]);
+    } catch (Exception $e) {
+        die("Error: " . $e->getMessage());
     }
+    redirectDashboard();
+}
 
-    if ($_SESSION['role'] == 'admin') {
+/* =========================
+   PAYMENT
+========================= */
+
+function validatePayment($pdo, $bookingId)
+{
+    checkAdmin();
+    $stmt = $pdo->prepare(
+        "UPDATE bookings
+         SET payment_status = 'Paid'
+         WHERE id = ?"
+    );
+    $stmt->execute([$bookingId]);
+    addTrackingLog(
+        $pdo,
+        $bookingId,
+        'Payment Validated',
+        'Pembayaran telah divalidasi oleh admin'
+    );
+}
+
+/* =========================
+   ASSIGN KURIR
+========================= */
+
+function assignKurir($pdo, $bookingId, $kurirId)
+{
+    checkAdmin();
+    $stmt = $pdo->prepare(
+        "UPDATE bookings
+         SET kurir_id = ?
+         WHERE id = ?"
+    );
+    $stmt->execute([$kurirId, $bookingId]);
+    $stmt = $pdo->prepare(
+        "SELECT name FROM users WHERE id = ?"
+    );
+    $stmt->execute([$kurirId]);
+    $kurirName = $stmt->fetchColumn();
+    addTrackingLog(
+        $pdo,
+        $bookingId,
+        'Assigned to Kurir',
+        'Order di-assign ke kurir: ' . $kurirName
+    );
+}
+
+/* =========================
+   UPDATE STATUS
+========================= */
+
+function updateBookingStatus($pdo, $bookingId, $status, $photoFile)
+{
+    $stmt = $pdo->prepare(
+        "UPDATE bookings
+         SET status = ?
+         WHERE id = ?"
+    );
+    $stmt->execute([$status, $bookingId]);
+    $photoPath = uploadPhoto($photoFile);
+    addTrackingLog(
+        $pdo,
+        $bookingId,
+        $status,
+        "Status diupdate menjadi " . $status,
+        $photoPath
+    );
+}
+
+/* =========================
+   TRACKING
+========================= */
+
+function addTrackingLog(
+    $pdo,
+    $bookingId,
+    $status,
+    $description,
+    $photo = null
+) {
+    $stmt = $pdo->prepare(
+        "INSERT INTO tracking_logs
+        (booking_id, status, description, photo_proof)
+        VALUES (?, ?, ?, ?)"
+    );
+    $stmt->execute([
+        $bookingId,
+        $status,
+        $description,
+        $photo
+    ]);
+}
+
+/* =========================
+   UPLOAD
+========================= */
+
+function uploadPhoto($file)
+{
+    if (!$file || $file['error'] != 0) {
+        return null;
+    }
+    $allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    $ext = strtolower(
+        pathinfo($file['name'], PATHINFO_EXTENSION)
+    );
+    if (!in_array($ext, $allowed)) {
+        throw new Exception("Format file tidak valid");
+    }
+    $newFilename = uniqid('proof_') . '.' . $ext;
+    $destination = 'uploads/' . $newFilename;
+    if (!move_uploaded_file($file['tmp_name'], $destination)) {
+        throw new Exception("Upload gagal");
+    }
+    return $destination;
+}
+
+/* =========================
+   HELPER
+========================= */
+
+function checkAdmin()
+{
+    if ($_SESSION['role'] != ROLE_ADMIN) {
+        throw new Exception("Unauthorized");
+    }
+}
+
+function redirectDashboard()
+{
+    if ($_SESSION['role'] == ROLE_ADMIN) {
         header("Location: dashboard_admin.php");
     } else {
         header("Location: dashboard_kurir.php");
